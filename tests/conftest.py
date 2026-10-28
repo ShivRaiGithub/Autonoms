@@ -1,7 +1,11 @@
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from autonoms.db import Base, get_session
 from autonoms.github import GitHubClient
 from autonoms.main import app, get_github
 
@@ -33,3 +37,22 @@ def fake_github():
 
     yield build
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def db_session():
+    """An in-memory SQLite database standing in for Postgres: no server needed."""
+    # StaticPool keeps one connection, otherwise each connection sees a fresh empty DB.
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+
+    def override():
+        yield session
+
+    app.dependency_overrides[get_session] = override
+    yield session
+    app.dependency_overrides.pop(get_session, None)
+    session.close()

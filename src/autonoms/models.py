@@ -1,8 +1,14 @@
 """Pydantic models: the shape of the data Autonoms works with."""
 
 from datetime import datetime
+from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+# GitHub names only allow these characters. Validating also blocks path tricks
+# like "..", because owner/repo go straight into a URL path.
+NAME = r"^[A-Za-z0-9_.-]+$"
 
 
 class Comment(BaseModel):
@@ -23,3 +29,27 @@ class Issue(BaseModel):
     url: str
     created_at: datetime
     comments: list[Comment]
+
+
+class TaskStatus(StrEnum):
+    CREATED = "created"
+
+
+class TaskCreate(BaseModel):
+    owner: str = Field(pattern=NAME, max_length=100)
+    repo: str = Field(pattern=NAME, max_length=100)
+    number: int = Field(ge=1)
+
+
+class Task(BaseModel):
+    """One piece of work: 'try to resolve this issue'. Later stages add more statuses."""
+
+    id: str
+    owner: str
+    repo: str
+    issue_number: int
+    issue_title: str
+    status: TaskStatus
+    created_at: datetime
+    updated_at: datetime
+    issue: Issue

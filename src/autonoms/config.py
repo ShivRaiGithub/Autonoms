@@ -14,6 +14,17 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
     github_api_url: str = "https://api.github.com"
 
+    postgres_connection_string: SecretStr | None = None
+
+    @property
+    def database_url(self) -> str:
+        if self.postgres_connection_string is None:
+            raise RuntimeError("POSTGRES_CONNECTION_STRING is not set in .env")
+        url = self.postgres_connection_string.get_secret_value()
+        # A plain "postgresql://" URL makes SQLAlchemy look for the old psycopg2
+        # driver. We installed psycopg 3, so name it explicitly.
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+
 
 @lru_cache
 def get_settings() -> Settings:
