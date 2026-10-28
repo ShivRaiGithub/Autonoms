@@ -53,3 +53,43 @@ class Task(BaseModel):
     created_at: datetime
     updated_at: datetime
     issue: Issue
+
+
+class RepoFile(BaseModel):
+    path: str
+    size: int
+
+
+class Commit(BaseModel):
+    sha: str
+    author: str
+    date: datetime
+    subject: str
+
+
+class RepoSummary(BaseModel):
+    branch: str
+    head: str
+    file_count: int
+    files: list[RepoFile]  # capped, see files_truncated
+    files_truncated: bool
+    manifests: list[str]  # dependency files found, e.g. pyproject.toml
+    commits: list[Commit]
+
+
+class IndexInfo(BaseModel):
+    files: int
+    chunks: int
+    embedding_model: str
+
+
+class SearchHit(BaseModel):
+    path: str
+    score: float
+    text: str
+
+
+class SearchResult(BaseModel):
+    query: str
+    mode: str
+    hits: list[SearchHit]

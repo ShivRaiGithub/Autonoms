@@ -2,18 +2,21 @@
 
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from autonoms import tasks
+from autonoms import search, tasks, workspace
 from autonoms.config import get_settings
 from autonoms.db import get_session, init_db
 from autonoms.github import GitHubClient, GitHubError, IssueNotFound, NotAnIssue, RateLimited
-from autonoms.models import NAME, Issue, Task, TaskCreate
+from autonoms.models import NAME, IndexInfo, Issue, RepoSummary, SearchResult, Task, TaskCreate
+from autonoms.search import SearchIndexes
+from autonoms.workspace import Workspaces
 
 
 @asynccontextmanager
@@ -41,9 +44,32 @@ def get_github() -> Iterator[GitHubClient]:
         client.close()
 
 
+def get_workspaces() -> Workspaces:
+    settings = get_settings()
+    token = settings.github_token.get_secret_value() if settings.github_token else None
+    return Workspaces(settings.workspaces_dir, settings.github_clone_url, token)
+
+
+def get_indexes(workspaces: Annotated[Workspaces, Depends(get_workspaces)]) -> SearchIndexes:
+    settings = get_settings()
+    return get_search_indexes(settings.indexes_dir, workspaces, settings.embedding_model)
+
+
+@lru_cache
+def _cached_indexes(root, workspaces_root, clone_base, model) -> SearchIndexes:
+    return SearchIndexes(root, Workspaces(workspaces_root, clone_base), model)
+
+
+def get_search_indexes(root, workspaces: Workspaces, model: str) -> SearchIndexes:
+    # One SearchIndexes per process so loaded indexes stay in memory between requests.
+    return _cached_indexes(root, workspaces.root, workspaces.clone_base, model)
+
+
 NameParam = Annotated[str, Path(pattern=NAME, max_length=100)]
 SessionDep = Annotated[Session, Depends(get_session)]
 GitHubDep = Annotated[GitHubClient, Depends(get_github)]
+WorkspacesDep = Annotated[Workspaces, Depends(get_workspaces)]
+IndexesDep = Annotated[SearchIndexes, Depends(get_indexes)]
 
 
 @app.get("/health")
@@ -95,7 +121,114 @@ def read_task(task_id: str, session: SessionDep) -> Task:
 
 
 @app.delete("/tasks/{task_id}", status_code=204)
-def remove_task(task_id: str, session: SessionDep) -> Response:
+def remove_task(
+    task_id: str, session: SessionDep, workspaces: WorkspacesDep, indexes: IndexesDep
+) -> Response:
     if not tasks.delete_task(session, task_id):
         raise HTTPException(404, "Task not found")
+    workspaces.remove(task_id)  # a task's workspace and index go with it
+    indexes.remove(task_id)
     return Response(status_code=204)
+
+
+def _task_or_404(session: Session, task_id: str) -> Task:
+    task = tasks.get_task(session, task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    return task
+
+
+@app.post("/tasks/{task_id}/workspace", response_model=RepoSummary)
+def create_workspace(
+    task_id: str, response: Response, session: SessionDep, workspaces: WorkspacesDep
+) -> RepoSummary:
+    task = _task_or_404(session, task_id)
+    try:
+        created = workspaces.create(task_id, task.owner, task.repo)
+        response.status_code = 201 if created else 200  # 200: it was already there
+        return workspaces.summary(task_id)
+    except workspace.GitError as exc:
+        if exc.not_found:
+            raise HTTPException(404, "Repository not found")
+        raise HTTPException(502, "Could not clone the repository")
+
+
+@app.get("/tasks/{task_id}/repo", response_model=RepoSummary)
+def read_repo(task_id: str, session: SessionDep, workspaces: WorkspacesDep) -> RepoSummary:
+    _task_or_404(session, task_id)
+    try:
+        return workspaces.summary(task_id)
+    except workspace.NoWorkspace:
+        raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
+    except workspace.GitError:
+        raise HTTPException(502, "git failed while inspecting the workspace")
+
+
+@app.get("/tasks/{task_id}/files")
+def read_file(task_id: str, path: str, session: SessionDep, workspaces: WorkspacesDep) -> dict:
+    _task_or_404(session, task_id)
+    try:
+        return {"path": path, "content": workspaces.read_file(task_id, path)}
+    except workspace.NoWorkspace:
+        raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
+    except workspace.InvalidPath:
+        raise HTTPException(400, "Invalid path")
+    except workspace.FileTooLarge:
+        raise HTTPException(413, "File too large")
+    except workspace.BinaryFile:
+        raise HTTPException(415, "Not a text file")
+
+
+@app.delete("/tasks/{task_id}/workspace", status_code=204)
+def remove_workspace(
+    task_id: str, session: SessionDep, workspaces: WorkspacesDep, indexes: IndexesDep
+) -> Response:
+    _task_or_404(session, task_id)
+    indexes.remove(task_id)  # an index of files that no longer exist is misleading
+    if not workspaces.remove(task_id):
+        raise HTTPException(404, "No workspace")
+    return Response(status_code=204)
+
+
+@app.post("/tasks/{task_id}/index", response_model=IndexInfo)
+def build_index(
+    task_id: str, session: SessionDep, indexes: IndexesDep
+) -> IndexInfo:
+    _task_or_404(session, task_id)
+    try:
+        return indexes.build(task_id)
+    except workspace.NoWorkspace:
+        raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
+
+
+def _run_search(indexes: SearchIndexes, task_id: str, query: str, mode: str, top_k: int) -> SearchResult:
+    try:
+        return indexes.search(task_id, query, mode, top_k)
+    except search.NoIndex:
+        raise HTTPException(404, "No index yet: POST /tasks/{id}/index first")
+
+
+@app.get("/tasks/{task_id}/search", response_model=SearchResult)
+def search_task(
+    task_id: str,
+    session: SessionDep,
+    indexes: IndexesDep,
+    q: Annotated[str, Query(min_length=1, max_length=2000)],
+    mode: Annotated[str, Query(pattern="^(keyword|semantic|hybrid)$")] = "hybrid",
+    top_k: Annotated[int, Query(ge=1, le=20)] = 5,
+) -> SearchResult:
+    _task_or_404(session, task_id)
+    return _run_search(indexes, task_id, q, mode, top_k)
+
+
+@app.get("/tasks/{task_id}/context", response_model=SearchResult)
+def issue_context(
+    task_id: str,
+    session: SessionDep,
+    indexes: IndexesDep,
+    top_k: Annotated[int, Query(ge=1, le=20)] = 3,
+) -> SearchResult:
+    """The code most relevant to this task's issue: the issue text is the query."""
+    task = _task_or_404(session, task_id)
+    query = f"{task.issue.title}\n{task.issue.body}"[:2000]
+    return _run_search(indexes, task_id, query, "hybrid", top_k)
