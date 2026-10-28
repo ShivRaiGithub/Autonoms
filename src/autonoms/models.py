@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 
 # GitHub names only allow these characters. Validating also blocks path tricks
 # like "..", because owner/repo go straight into a URL path.
-NAME = r"^[A-Za-z0-9_.-]+$"
+# At least one non-dot character: "." and ".." are path steps, not names. (No lookahead:
+# pydantic's regex engine does not support it.)
+NAME = r"^[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"
 
 
 class Comment(BaseModel):
@@ -96,7 +98,9 @@ class SearchResult(BaseModel):
 
 
 class RunRequest(BaseModel):
-    max_steps: int = Field(default=8, ge=1, le=15)
+    max_steps: int = Field(default=8, ge=1, le=15)  # model calls
+    max_repairs: int = Field(default=1, ge=0, le=3)  # extra rounds after a failed check
+    restart: bool = False  # discard a finished/interrupted run of this task and start again
 
 
 class CheckProblem(BaseModel):
@@ -124,6 +128,13 @@ class AgentStep(BaseModel):
     result: str  # what the model was told (already shortened)
 
 
+class Usage(BaseModel):
+    model_calls: int = 0
+    prompt_tokens: int = 0  # total tokens the model read, summed over calls
+    completion_tokens: int = 0
+    peak_prompt_tokens: int = 0  # the largest single prompt: compare with the 8192 window
+
+
 class AgentRun(BaseModel):
     # finished: the model called `finish`. The others are why we stopped it.
     status: str  # finished | no_tool_call | max_steps | context_limit | llm_error
@@ -132,4 +143,42 @@ class AgentRun(BaseModel):
     diff: str  # `git diff` of the workspace: the proposed patch
     check_before: CheckResult  # the check on the untouched clone
     check_after: CheckResult  # the check on the result
+    usage: Usage = Usage()
+    compactions: int = 0  # calls where older steps were collapsed to fit the context
+    memories_used: list[str] = []  # ids of long-term memories shown to the model
     seconds: float
+
+
+class RunStatus(BaseModel):
+    # not_started | running | interrupted (can be resumed) | finished
+    state: str
+    status: str = ""  # the run's own status once it has one
+    next: list[str] = []  # graph nodes still to run
+    model_calls: int = 0
+    repairs: int = 0
+    steps: list[AgentStep] = []
+
+
+MEMORY_KINDS = ("convention", "preference", "pitfall", "finding")
+
+
+class MemoryCreate(BaseModel):
+    repo: str = Field(pattern=r"^(\*|[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*)$", max_length=201)  # "owner/name", or "*" for everywhere
+    kind: str = Field(pattern=f"^({'|'.join(MEMORY_KINDS)})$")
+    content: str = Field(min_length=1, max_length=500)
+
+
+class MemoryUpdate(BaseModel):
+    content: str = Field(min_length=1, max_length=500)
+
+
+class Memory(BaseModel):
+    id: str
+    repo: str
+    kind: str  # the four above, or "history" (written by Autonoms after a run)
+    content: str
+    source_task_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: datetime | None
+    use_count: int

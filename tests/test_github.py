@@ -83,3 +83,14 @@ def test_token_is_sent_but_never_shown():
     settings = Settings(github_token="ghp_secret123")
     assert "ghp_secret123" not in repr(settings)
     assert "ghp_secret123" not in str(settings)
+
+
+def test_dot_only_names_are_rejected(fake_github):
+    """Regression: ".." passed the name pattern and would be a path step in the GitHub URL."""
+    calls = []
+    client = fake_github(lambda r: calls.append(r) or httpx.Response(200, json={}))
+    for path in ("/issues/../r/1", "/issues/o/../1", "/issues/./r/1"):
+        assert client.get(path).status_code in (404, 422)  # the HTTP client may also normalise the path
+    assert client.post("/tasks", json={"owner": "..", "repo": "r", "number": 1}).status_code == 422
+    assert client.post("/tasks", json={"owner": "o", "repo": ".", "number": 1}).status_code == 422
+    assert calls == []

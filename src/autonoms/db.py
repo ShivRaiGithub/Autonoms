@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from functools import lru_cache
 
-from sqlalchemy import JSON, DateTime, Engine, Integer, String, create_engine
+from sqlalchemy import JSON, DateTime, Engine, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from autonoms.config import get_settings
@@ -29,6 +29,22 @@ class TaskRow(Base):
     issue: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryRow(Base):
+    """Long-term memory: short notes that outlive a single task."""
+
+    __tablename__ = "memories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(201), index=True)  # "owner/name", or "*" = applies everywhere
+    kind: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    source_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 @lru_cache

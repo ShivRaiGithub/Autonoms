@@ -1,16 +1,21 @@
 """FastAPI application: the HTTP interface to Autonoms."""
 
 from collections.abc import Iterator
+import threading
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
+import psycopg
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolTimeout
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from autonoms import search, tasks, workspace
+from autonoms import memory, search, tasks, workspace
 from autonoms.agent import Agent
 from autonoms.checker import Checker
 from autonoms.llm import LLM, OllamaClient
@@ -23,20 +28,26 @@ from autonoms.models import (
     CheckResult,
     IndexInfo,
     Issue,
+    Memory,
+    MemoryCreate,
+    MemoryUpdate,
     RepoSummary,
     RunRequest,
+    RunStatus,
     SearchResult,
     Task,
     TaskCreate,
 )
 from autonoms.sandbox import Sandbox
 from autonoms.search import SearchIndexes
+from autonoms.workflow import Workflow, WorkspaceChanged
 from autonoms.workspace import Workspaces
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()  # runs once when the server starts
+    get_checkpointer()  # create the checkpoint tables now, before concurrent requests arrive
     yield
 
 
@@ -44,7 +55,9 @@ app = FastAPI(title="Autonoms", lifespan=lifespan)
 
 
 @app.exception_handler(OperationalError)
-def database_unavailable(request: Request, exc: OperationalError) -> JSONResponse:
+@app.exception_handler(psycopg.OperationalError)
+@app.exception_handler(PoolTimeout)
+def database_unavailable(request: Request, exc: Exception) -> JSONResponse:
     # Don't echo exc: its text can contain the connection details.
     return JSONResponse({"detail": "Database unavailable"}, status_code=503)
 
@@ -84,6 +97,42 @@ def get_checker(workspaces: Annotated[Workspaces, Depends(get_workspaces)]) -> C
     settings = get_settings()
     sandbox = Sandbox(settings.sandbox_image, settings.sandbox_timeout_seconds, settings.sandbox_memory)
     return Checker(sandbox, workspaces)
+
+
+_checkpointer: BaseCheckpointSaver | None = None
+_checkpointer_lock = threading.Lock()
+
+
+def get_checkpointer() -> BaseCheckpointSaver:
+    """Saves workflow state in Postgres (tables are created on first use).
+
+    The lock matters: requests run in parallel threads, and two of them creating
+    the tables at the same moment crashed with a "duplicate key" error (found in
+    the real run, invisible to tests that use an in-memory store).
+    """
+    global _checkpointer
+    with _checkpointer_lock:
+        if _checkpointer is None:
+            _checkpointer = _create_checkpointer()
+        return _checkpointer
+
+
+def _create_checkpointer() -> BaseCheckpointSaver:
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    url = get_settings().postgres_connection_string
+    if url is None:
+        raise RuntimeError("POSTGRES_CONNECTION_STRING is not set in .env")
+    pool = ConnectionPool(
+        url.get_secret_value(),
+        max_size=5,
+        # the settings LangGraph's saver requires
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        open=True,
+    )
+    saver = PostgresSaver(pool)
+    saver.setup()  # creates the checkpoint tables if missing; never alters existing ones
+    return saver
 
 
 def get_llm() -> LLM:
@@ -148,12 +197,17 @@ def read_task(task_id: str, session: SessionDep) -> Task:
 
 @app.delete("/tasks/{task_id}", status_code=204)
 def remove_task(
-    task_id: str, session: SessionDep, workspaces: WorkspacesDep, indexes: IndexesDep
+    task_id: str,
+    session: SessionDep,
+    workspaces: WorkspacesDep,
+    indexes: IndexesDep,
+    checkpointer: Annotated[BaseCheckpointSaver, Depends(get_checkpointer)],
 ) -> Response:
     if not tasks.delete_task(session, task_id):
         raise HTTPException(404, "Task not found")
     workspaces.remove(task_id)  # a task's workspace and index go with it
     indexes.remove(task_id)
+    checkpointer.delete_thread(task_id)  # and so does its saved run history
     return Response(status_code=204)
 
 
@@ -263,26 +317,92 @@ def issue_context(
 _running: set[str] = set()  # task ids with a run in progress (this process only)
 
 
+def get_workflow(
+    llm: Annotated[LLM, Depends(get_llm)],
+    workspaces: WorkspacesDep,
+    indexes: IndexesDep,
+    checker: Annotated[Checker, Depends(get_checker)],
+    checkpointer: Annotated[BaseCheckpointSaver, Depends(get_checkpointer)],
+    session: SessionDep,
+) -> Workflow:
+    def memories_for(task: Task) -> list[Memory]:
+        text = f"{task.issue.title}\n{task.issue.body}"
+        return memory.MemoryStore(session).relevant(f"{task.owner}/{task.repo}", text)
+
+    return Workflow(
+        llm, workspaces, Agent(llm, workspaces, indexes, checker), checker, checkpointer,
+        compact_at=get_settings().context_compact_chars, memory_lookup=memories_for,
+    )  # fmt: skip
+
+
+WorkflowDep = Annotated[Workflow, Depends(get_workflow)]
+
+
 @app.post("/tasks/{task_id}/run", response_model=AgentRun)
 def run_agent(
     task_id: str,
     session: SessionDep,
     workspaces: WorkspacesDep,
     indexes: IndexesDep,
-    llm: Annotated[LLM, Depends(get_llm)],
-    checker: Annotated[Checker, Depends(get_checker)],
+    flow: WorkflowDep,
     body: RunRequest | None = None,
 ) -> AgentRun:
     """Let the model try to resolve the task's issue. Takes minutes on a local model."""
+    body = body or RunRequest()
     task = _task_or_404(session, task_id)
     if not workspaces.exists(task_id):
         raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
     if task_id in _running:
         raise HTTPException(409, "A run is already in progress for this task")
+    if flow.exists(task_id):
+        if not body.restart:
+            raise HTTPException(
+                409,
+                "This task already has a run. POST /tasks/{id}/resume to continue an interrupted one, "
+                "or run again with restart=true (the workspace keeps its edits).",
+            )
+        flow.reset(task_id)
     _running.add(task_id)
     try:
         indexes.build(task_id)  # always start from an index that matches the files
-        return Agent(llm, workspaces, indexes, checker).run(task, (body or RunRequest()).max_steps)
+        result = flow.start(task, body.max_steps, body.max_repairs)
+        memory.MemoryStore(session).record_history(task, result)
+        return result
+    finally:
+        _running.discard(task_id)
+
+
+@app.get("/tasks/{task_id}/run", response_model=RunStatus)
+def run_status(task_id: str, session: SessionDep, flow: WorkflowDep) -> RunStatus:
+    """Progress of the run, read from its latest checkpoint (works while it is running)."""
+    _task_or_404(session, task_id)
+    return flow.status(task_id, running=task_id in _running)
+
+
+@app.post("/tasks/{task_id}/resume", response_model=AgentRun)
+def resume_run(
+    task_id: str, session: SessionDep, workspaces: WorkspacesDep, indexes: IndexesDep, flow: WorkflowDep
+) -> AgentRun:
+    """Continue an interrupted run from its last checkpoint."""
+    task = _task_or_404(session, task_id)
+    if not flow.exists(task_id):
+        raise HTTPException(404, "This task has no run to resume")
+    if task_id in _running:
+        raise HTTPException(409, "A run is already in progress for this task")
+    if flow.finished(task_id):
+        raise HTTPException(409, "The run already finished; nothing to resume")
+    if not workspaces.exists(task_id):
+        raise HTTPException(409, "The workspace is gone; start a new run with restart=true")
+    _running.add(task_id)
+    try:
+        indexes.build(task_id)
+        result = flow.resume(task_id)
+        memory.MemoryStore(session).record_history(task, result)
+        return result
+    except WorkspaceChanged:
+        raise HTTPException(
+            409, "The workspace changed since the last checkpoint, so resuming is unsafe. Run again with restart=true."
+        )
     finally:
         _running.discard(task_id)
 
@@ -297,3 +417,43 @@ def check_task(
         return checker.run(task_id)
     except workspace.NoWorkspace:
         raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
+
+
+# --- long-term memory ---------------------------------------------------------------
+
+
+@app.post("/memories", response_model=Memory, status_code=201)
+def create_memory(body: MemoryCreate, session: SessionDep) -> Memory:
+    try:
+        return memory.MemoryStore(session).create(body.repo, body.kind, body.content)
+    except memory.SecretDetected as exc:
+        raise HTTPException(422, str(exc))
+    except memory.TooManyMemories:
+        raise HTTPException(409, "Too many memories for this repository: delete some first")
+
+
+@app.get("/memories", response_model=list[Memory])
+def list_memories(
+    session: SessionDep, repo: Annotated[str, Query(pattern=r"^[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$")]
+) -> list[Memory]:
+    """Memories that apply to this repository (including the "*" ones)."""
+    return memory.MemoryStore(session).for_repo(repo)
+
+
+@app.patch("/memories/{memory_id}", response_model=Memory)
+def update_memory(memory_id: str, body: MemoryUpdate, session: SessionDep) -> Memory:
+    try:
+        return memory.MemoryStore(session).update(memory_id, body.content)
+    except memory.MemoryNotFound:
+        raise HTTPException(404, "Memory not found")
+    except memory.SecretDetected as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.delete("/memories/{memory_id}", status_code=204)
+def delete_memory(memory_id: str, session: SessionDep) -> Response:
+    try:
+        memory.MemoryStore(session).delete(memory_id)
+    except memory.MemoryNotFound:
+        raise HTTPException(404, "Memory not found")
+    return Response(status_code=204)

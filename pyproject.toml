@@ -13,7 +13,9 @@ dependencies = [
     "llama-index-retrievers-bm25>=0.5",
     "torch>=2.4",
     "sqlalchemy>=2.0",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary,pool]>=3.2",
+    "langgraph>=1.2.18",
+    "langgraph-checkpoint-postgres>=3.2.0",
 ]
 
 [dependency-groups]

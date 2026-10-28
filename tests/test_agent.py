@@ -195,7 +195,10 @@ def test_ollama_request_and_response_shape():
     reply = ollama(handler, think=False).chat(
         [{"role": "assistant", "content": "", "tool_calls": [{"name": "t", "arguments": {"a": 1}}]}], [{"tools": 1}]
     )
-    assert reply == {"role": "assistant", "content": "", "tool_calls": [{"name": "read_file", "arguments": {"path": "a.md"}}]}
+    assert reply == {
+        "role": "assistant", "content": "", "tool_calls": [{"name": "read_file", "arguments": {"path": "a.md"}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+    }  # fmt: skip
     assert seen["model"] == "m" and seen["stream"] is False and seen["think"] is False
     assert seen["options"]["temperature"] == 0
     assert seen["messages"][0]["tool_calls"] == [{"function": {"name": "t", "arguments": {"a": 1}}}]

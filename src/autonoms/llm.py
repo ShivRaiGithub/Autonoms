@@ -17,7 +17,8 @@ class LLMError(Exception):
 class LLM(Protocol):
     def chat(self, messages: list[dict], tools: list[dict]) -> dict:
         """Send the conversation; return the assistant message
-        {"role": "assistant", "content": str, "tool_calls": [{"name", "arguments"}]}."""
+        {"role": "assistant", "content": str, "tool_calls": [{"name", "arguments"}],
+        "usage": {"prompt_tokens", "completion_tokens"}}  (usage is optional)."""
 
 
 class OllamaClient:
@@ -44,12 +45,18 @@ class OllamaClient:
         try:
             response = self._client.post("/api/chat", json=body)
             response.raise_for_status()
-            message = response.json()["message"]
+            data = response.json()
+            message = data["message"]
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             raise LLMError(f"Model call failed: {exc.__class__.__name__}") from exc
         return {
             "role": "assistant",
             "content": message.get("content") or "",
+            # Ollama reports exactly how many tokens it read and wrote for this call.
+            "usage": {
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+            },
             # message["thinking"] is deliberately dropped: it costs context and
             # the model does not need to read its own earlier reasoning.
             "tool_calls": [self._tool_call(c) for c in message.get("tool_calls") or []],
@@ -58,6 +65,7 @@ class OllamaClient:
     @staticmethod
     def _to_wire(message: dict) -> dict:
         """Our flat tool calls -> Ollama's {"function": {...}} shape, for echoing history back."""
+        message = {k: v for k, v in message.items() if k != "usage"}  # bookkeeping, not conversation
         if not message.get("tool_calls"):
             return message
         calls = [{"function": {"name": c["name"], "arguments": c["arguments"]}} for c in message["tool_calls"]]

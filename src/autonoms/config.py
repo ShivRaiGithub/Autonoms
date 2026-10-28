@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3.5:9b-8k"
     ollama_think: bool | None = None  # None = the model's default
 
+    # When the conversation passes this many characters, older steps are collapsed (context.py).
+    context_compact_chars: int = 12000
+
     # The sandbox that runs checks. Pinned tag: "latest" would change under you.
     sandbox_image: str = "python:3.13.7-slim"
     sandbox_timeout_seconds: int = 20

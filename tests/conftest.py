@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from autonoms.db import Base, get_session
 from autonoms.github import GitHubClient
-from autonoms.main import app, get_github
+from autonoms.main import app, get_checkpointer, get_github
 from autonoms.workspace import Workspaces
 
 
@@ -120,3 +120,14 @@ def notes_server(tmp_path):
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "notes")
     return f"file://{tmp_path / 'notes_server'}"
+
+
+@pytest.fixture(autouse=True)
+def memory_checkpointer():
+    """Every test gets an in-memory checkpoint store, so none can touch real Postgres."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    saver = InMemorySaver()
+    app.dependency_overrides[get_checkpointer] = lambda: saver
+    yield saver
+    app.dependency_overrides.pop(get_checkpointer, None)
