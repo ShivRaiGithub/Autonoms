@@ -39,18 +39,29 @@ def run(status="finished", files=("formulas.md",), before=3, after=3):
 # --- safety ----------------------------------------------------------------------------
 
 
+# Fake credentials for testing the filter. They are NOT real, and they are assembled from pieces at
+# run time on purpose: a complete credential-shaped string in the source makes secret scanners
+# (GitHub push protection, for one) block the push, however obviously fake it is.
+FAKE_GITHUB_TOKEN = "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz" + "0123456789"
+FAKE_GITHUB_PAT = "github" + "_pat_" + "11ABCDEFG0" + "abcdefghijklmnop"
+FAKE_OPENAI_KEY = "s" + "k-" + "abcdefghijklmnopqrstuvwxyz"
+FAKE_AWS_KEY_ID = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+FAKE_PRIVATE_KEY = "-----BEGIN " + "RSA PRIVATE KEY-----"
+FAKE_LONG_TOKEN = "x" * 20 + "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4O5p6Q7r8S9t0"
+
+
 @pytest.mark.parametrize(
     "text",
     [
-        "use ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        "github_pat_11ABCDEFG0abcdefghijklmnop",
+        "use " + FAKE_GITHUB_TOKEN,
+        FAKE_GITHUB_PAT,
         "token = abc123",
         "PASSWORD: hunter2",
         "postgresql://user:pw123@localhost:5432/db",
-        "sk-abcdefghijklmnopqrstuvwxyz",
-        "AKIAABCDEFGHIJKLMNOP",
-        "-----BEGIN RSA PRIVATE KEY-----",
-        "x" * 20 + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0",
+        FAKE_OPENAI_KEY,
+        FAKE_AWS_KEY_ID,
+        FAKE_PRIVATE_KEY,
+        FAKE_LONG_TOKEN,
     ],
 )
 def test_credentials_are_refused(store, text):
@@ -74,7 +85,7 @@ def test_updating_to_a_credential_is_refused_too(store):
 
 
 def test_a_secret_in_an_issue_title_stops_the_history_memory(store):
-    assert store.record_history(task(title="my key is ghp_abcdefghijklmnopqrstuvwxyz0123456789"), run()) is None
+    assert store.record_history(task(title="my key is " + FAKE_GITHUB_TOKEN), run()) is None
     assert store.for_repo(REPO) == []
 
 

@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 
 docs/
-seed-repo/workspaces/
+seed-repo/
+workspaces/
 indexes/
