@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     workspaces_dir: Path = Path("workspaces")
     github_clone_url: str = "https://github.com"
 
+    # The local LLM. "9b-8k" is your 8k-context variant: faster and fits the GPU better.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen3.5:9b-8k"
+    ollama_think: bool | None = None  # None = the model's default
+
+    # The sandbox that runs checks. Pinned tag: "latest" would change under you.
+    sandbox_image: str = "python:3.13.7-slim"
+    sandbox_timeout_seconds: int = 20
+    sandbox_memory: str = "256m"
+
     # Search indexes (one per task) and the embedding model that powers them.
     indexes_dir: Path = Path("indexes")
     embedding_model: str = "BAAI/bge-small-en-v1.5"

@@ -11,10 +11,25 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from autonoms import search, tasks, workspace
+from autonoms.agent import Agent
+from autonoms.checker import Checker
+from autonoms.llm import LLM, OllamaClient
 from autonoms.config import get_settings
 from autonoms.db import get_session, init_db
 from autonoms.github import GitHubClient, GitHubError, IssueNotFound, NotAnIssue, RateLimited
-from autonoms.models import NAME, IndexInfo, Issue, RepoSummary, SearchResult, Task, TaskCreate
+from autonoms.models import (
+    NAME,
+    AgentRun,
+    CheckResult,
+    IndexInfo,
+    Issue,
+    RepoSummary,
+    RunRequest,
+    SearchResult,
+    Task,
+    TaskCreate,
+)
+from autonoms.sandbox import Sandbox
 from autonoms.search import SearchIndexes
 from autonoms.workspace import Workspaces
 
@@ -63,6 +78,17 @@ def _cached_indexes(root, workspaces_root, clone_base, model) -> SearchIndexes:
 def get_search_indexes(root, workspaces: Workspaces, model: str) -> SearchIndexes:
     # One SearchIndexes per process so loaded indexes stay in memory between requests.
     return _cached_indexes(root, workspaces.root, workspaces.clone_base, model)
+
+
+def get_checker(workspaces: Annotated[Workspaces, Depends(get_workspaces)]) -> Checker:
+    settings = get_settings()
+    sandbox = Sandbox(settings.sandbox_image, settings.sandbox_timeout_seconds, settings.sandbox_memory)
+    return Checker(sandbox, workspaces)
+
+
+def get_llm() -> LLM:
+    settings = get_settings()
+    return OllamaClient.create(settings.ollama_base_url, settings.ollama_model, settings.ollama_think)
 
 
 NameParam = Annotated[str, Path(pattern=NAME, max_length=100)]
@@ -232,3 +258,42 @@ def issue_context(
     task = _task_or_404(session, task_id)
     query = f"{task.issue.title}\n{task.issue.body}"[:2000]
     return _run_search(indexes, task_id, query, "hybrid", top_k)
+
+
+_running: set[str] = set()  # task ids with a run in progress (this process only)
+
+
+@app.post("/tasks/{task_id}/run", response_model=AgentRun)
+def run_agent(
+    task_id: str,
+    session: SessionDep,
+    workspaces: WorkspacesDep,
+    indexes: IndexesDep,
+    llm: Annotated[LLM, Depends(get_llm)],
+    checker: Annotated[Checker, Depends(get_checker)],
+    body: RunRequest | None = None,
+) -> AgentRun:
+    """Let the model try to resolve the task's issue. Takes minutes on a local model."""
+    task = _task_or_404(session, task_id)
+    if not workspaces.exists(task_id):
+        raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")
+    if task_id in _running:
+        raise HTTPException(409, "A run is already in progress for this task")
+    _running.add(task_id)
+    try:
+        indexes.build(task_id)  # always start from an index that matches the files
+        return Agent(llm, workspaces, indexes, checker).run(task, (body or RunRequest()).max_steps)
+    finally:
+        _running.discard(task_id)
+
+
+@app.post("/tasks/{task_id}/check", response_model=CheckResult)
+def check_task(
+    task_id: str, session: SessionDep, checker: Annotated[Checker, Depends(get_checker)]
+) -> CheckResult:
+    """Run the arithmetic check on the task's workspace, inside the sandbox."""
+    _task_or_404(session, task_id)
+    try:
+        return checker.run(task_id)
+    except workspace.NoWorkspace:
+        raise HTTPException(404, "No workspace yet: POST /tasks/{id}/workspace first")

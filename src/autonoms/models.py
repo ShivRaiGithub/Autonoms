@@ -93,3 +93,43 @@ class SearchResult(BaseModel):
     query: str
     mode: str
     hits: list[SearchHit]
+
+
+class RunRequest(BaseModel):
+    max_steps: int = Field(default=8, ge=1, le=15)
+
+
+class CheckProblem(BaseModel):
+    file: str
+    line: int
+    text: str
+    claimed: str
+    actual: str
+
+
+class CheckResult(BaseModel):
+    # passed: ran, nothing wrong. failed: ran, found wrong equations.
+    # not_run: it did not run to completion (Docker down, timeout, crash).
+    # "not_run" is never the same as "passed".
+    status: str
+    equations: int = 0
+    problems: list[CheckProblem] = []
+    detail: str = ""  # why it did not run, if it did not
+    seconds: float = 0
+
+
+class AgentStep(BaseModel):
+    tool: str
+    arguments: dict
+    result: str  # what the model was told (already shortened)
+
+
+class AgentRun(BaseModel):
+    # finished: the model called `finish`. The others are why we stopped it.
+    status: str  # finished | no_tool_call | max_steps | context_limit | llm_error
+    summary: str
+    steps: list[AgentStep]
+    diff: str  # `git diff` of the workspace: the proposed patch
+    check_before: CheckResult  # the check on the untouched clone
+    check_after: CheckResult  # the check on the result
+    seconds: float

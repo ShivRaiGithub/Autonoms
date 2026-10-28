@@ -45,6 +45,10 @@ class BinaryFile(Exception):
     pass
 
 
+class EditError(Exception):
+    pass
+
+
 class Workspaces:
     def __init__(self, root: Path, clone_base: str, token: str | None = None):
         self.root = Path(root).resolve()
@@ -175,7 +179,8 @@ class Workspaces:
                 continue
         return result
 
-    def read_file(self, task_id: str, relative_path: str) -> str:
+    def _safe_target(self, task_id: str, relative_path: str) -> Path:
+        """Turn a path from outside into a real file inside the workspace, or raise."""
         ws = self._require(task_id)
         if not relative_path or "\0" in relative_path or Path(relative_path).is_absolute():
             raise InvalidPath(relative_path)
@@ -187,9 +192,29 @@ class Workspaces:
             raise InvalidPath(relative_path)
         if not target.is_file():
             raise InvalidPath(relative_path)
+        return target
+
+    def read_file(self, task_id: str, relative_path: str) -> str:
+        target = self._safe_target(task_id, relative_path)
         if target.stat().st_size > MAX_FILE_BYTES:
             raise FileTooLarge(relative_path)
         try:
             return target.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
             raise BinaryFile(relative_path) from exc
+
+    def replace_in_file(self, task_id: str, relative_path: str, old: str, new: str) -> None:
+        """Replace one exact piece of text. Refuses if it is missing or ambiguous."""
+        text = self.read_file(task_id, relative_path)  # same checks as reading
+        if not old:
+            raise EditError("old_text must not be empty")
+        count = text.count(old)
+        if count == 0:
+            raise EditError("old_text was not found in the file")
+        if count > 1:
+            raise EditError(f"old_text appears {count} times; include more surrounding text")
+        self._safe_target(task_id, relative_path).write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    def diff(self, task_id: str) -> str:
+        """The changes made in the workspace so far, as a unified diff."""
+        return self._git(["diff", "--no-color"], self._require(task_id))
