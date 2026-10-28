@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from autonoms import memory, search, tasks, workspace
 from autonoms.agent import Agent
 from autonoms.checker import Checker
-from autonoms.llm import LLM, OllamaClient
+from autonoms.llm import LLM, GatewayClient, OllamaClient
 from autonoms.config import get_settings
 from autonoms.db import get_session, init_db
 from autonoms.github import GitHubClient, GitHubError, IssueNotFound, NotAnIssue, RateLimited
@@ -137,6 +137,9 @@ def _create_checkpointer() -> BaseCheckpointSaver:
 
 def get_llm() -> LLM:
     settings = get_settings()
+    if settings.llm_backend == "gateway":
+        key = settings.litellm_master_key.get_secret_value() if settings.litellm_master_key else None
+        return GatewayClient.create(settings.gateway_url, settings.gateway_model, key)
     return OllamaClient.create(settings.ollama_base_url, settings.ollama_model, settings.ollama_think)
 
 
