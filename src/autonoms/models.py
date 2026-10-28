@@ -186,3 +186,43 @@ class Memory(BaseModel):
     updated_at: datetime
     last_used_at: datetime | None
     use_count: int
+
+
+class Risk(BaseModel):
+    level: str  # "info" = good to know; "warn" = must be acknowledged before publishing
+    text: str
+
+
+class Publication(BaseModel):
+    task_id: str
+    branch: str
+    base: str
+    pr_number: int
+    pr_url: str
+    approved_by: str
+    fingerprint: str
+    draft: bool
+    created_at: datetime
+
+
+class Review(BaseModel):
+    """What a human reads before approving. `fingerprint` identifies exactly this content."""
+
+    title: str
+    body: str
+    diff: str  # the exact change; covered by the fingerprint, so what you read is what you approve
+    branch: str
+    files: list[str]
+    risks: list[Risk]
+    blockers: list[str]  # reasons publishing is not possible at all
+    needs_acknowledgement: bool  # True if any risk is a warning
+    fingerprint: str
+    can_publish: bool
+    publication: Publication | None = None
+
+
+class PublishRequest(BaseModel):
+    fingerprint: str = Field(min_length=64, max_length=64)  # copied from GET /review: "I read exactly this"
+    approved_by: str = Field(min_length=1, max_length=80)
+    acknowledge_warnings: bool = False
+    draft: bool = True

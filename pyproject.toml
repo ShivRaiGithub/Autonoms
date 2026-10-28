@@ -16,10 +16,14 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",
     "langgraph>=1.2.18",
     "langgraph-checkpoint-postgres>=3.2.0",
+    "nicegui>=3.18.0",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.4.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,6 +34,11 @@ packages = ["src/autonoms"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# NiceGUI's "simulated user" plugin: lets tests click through the real page code without a browser.
+addopts = "-p nicegui.testing.user_plugin"
+main_file = ""
 
 # CPU-only PyTorch: the default Linux wheel bundles several GB of CUDA libraries
 # that CPU inference never uses.

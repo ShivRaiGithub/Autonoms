@@ -21,6 +21,10 @@ class RateLimited(GitHubError):
     pass
 
 
+class PullRequestExists(GitHubError):
+    pass
+
+
 class GitHubClient:
     def __init__(self, client: httpx.Client):
         # The httpx.Client is passed in so tests can give it a fake transport.
@@ -75,3 +79,28 @@ class GitHubClient:
                 for c in raw_comments
             ],
         )
+
+    def create_pull_request(self, owner: str, repo: str, head: str, base: str, title: str, body: str, draft: bool = True) -> tuple[int, str]:
+        """Open a pull request; returns (number, url)."""
+        try:
+            response = self._client.post(
+                f"/repos/{owner}/{repo}/pulls",
+                json={"title": title, "head": head, "base": base, "body": body, "draft": draft},
+            )
+        except httpx.HTTPError as exc:
+            raise GitHubError(f"Could not reach GitHub: {exc.__class__.__name__}") from exc
+        if response.status_code in (401, 403, 404):
+            # 404 is what GitHub answers when a token may not see or write the repository
+            raise GitHubError("GitHub refused the request: the token may lack 'Pull requests: write' permission")
+        if response.status_code == 422:
+            if "already exists" in response.text:
+                raise PullRequestExists(head)
+            raise GitHubError("GitHub rejected the pull request (is there a difference between the branches?)")
+        if response.status_code >= 400:
+            raise GitHubError(f"GitHub returned {response.status_code}")
+        data = response.json()
+        return data["number"], data["html_url"]
+
+    def find_pull_request(self, owner: str, repo: str, head: str) -> tuple[int, str] | None:
+        found = self._get(f"/repos/{owner}/{repo}/pulls", head=f"{owner}:{head}", state="all").json()
+        return (found[0]["number"], found[0]["html_url"]) if found else None

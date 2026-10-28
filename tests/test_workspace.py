@@ -140,3 +140,27 @@ def test_deleting_a_task_removes_its_workspace(api, workspaces):
     assert workspaces.exists(task_id)
     assert api.delete(f"/tasks/{task_id}").status_code == 204
     assert not workspaces.exists(task_id)
+
+
+def test_a_workspace_does_not_exist_until_its_clone_is_complete(workspaces, monkeypatch):
+    """Found through the web UI: a request arriving mid-clone saw an empty workspace."""
+    seen = []
+    real_git = Workspaces._git
+
+    def spy(self, args, cwd=None):
+        if args and args[0] == "clone":
+            seen.append(self.exists(TASK))  # asked while git is cloning
+        return real_git(self, args, cwd)
+
+    monkeypatch.setattr(Workspaces, "_git", spy)
+    workspaces.create(TASK, "o", "r")
+    assert seen == [False] and workspaces.exists(TASK)
+    assert not (workspaces.root / f".{TASK}.partial").exists()  # the temporary folder is gone
+
+
+def test_a_failed_clone_leaves_neither_a_workspace_nor_a_temporary_folder(workspaces):
+    from autonoms.workspace import GitError
+
+    with pytest.raises(GitError):
+        workspaces.create(TASK, "o", "nope")
+    assert not workspaces.exists(TASK) and not (workspaces.root / f".{TASK}.partial").exists()

@@ -6,6 +6,7 @@ shell; it gets these narrow functions.
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -24,9 +25,13 @@ MANIFESTS = {
 
 
 class GitError(Exception):
-    def __init__(self, message: str, not_found: bool = False):
+    def __init__(self, message: str, not_found: bool = False, denied: bool = False):
         super().__init__(message)
         self.not_found = not_found
+        self.denied = denied  # the remote refused our credentials or permissions
+
+
+BRANCH = re.compile(r"^autonoms/issue-\d+-[0-9a-f]{8}$")  # the only branch names we ever create or push
 
 
 class NoWorkspace(Exception):
@@ -109,24 +114,33 @@ class Workspaces:
                 phrase in stderr
                 for phrase in ("not found", "does not exist", "does not appear to be a git repository")
             )
+            denied = "permission to" in stderr or "denied" in stderr or "returned error: 403" in stderr
             # Don't pass stderr on: keep error text fixed and predictable.
-            raise GitError("git command failed", not_found=not_found)
+            raise GitError("git command failed", not_found=not_found, denied=denied)
         return result.stdout
 
     # --- lifecycle --------------------------------------------------------------
 
     def create(self, task_id: str, owner: str, repo: str) -> bool:
-        """Clone the repo for this task. Returns False if the workspace already existed."""
+        """Clone the repo for this task. Returns False if the workspace already existed.
+
+        The clone is made in a temporary folder and renamed into place when complete, so
+        `exists()` can never be true for a half-finished clone (a request arriving mid-clone
+        would otherwise see a workspace with no files in it).
+        """
         dest = self.path(task_id)
         if dest.exists():
             return False
         self.root.mkdir(parents=True, exist_ok=True)
+        partial = self.root / f".{dest.name}.partial"
+        shutil.rmtree(partial, ignore_errors=True)  # left over from a crash
         url = f"{self.clone_base}/{owner}/{repo}.git"
         try:
             # --depth 50: only recent history; plenty for "what changed lately".
-            self._git(["clone", "--quiet", "--depth", "50", url, str(dest)])
+            self._git(["clone", "--quiet", "--depth", "50", url, str(partial)])
+            partial.rename(dest)
         except GitError:
-            shutil.rmtree(dest, ignore_errors=True)  # remove a half-made clone
+            shutil.rmtree(partial, ignore_errors=True)  # remove a half-made clone
             raise
         return True
 
@@ -218,3 +232,35 @@ class Workspaces:
     def diff(self, task_id: str) -> str:
         """The changes made in the workspace so far, as a unified diff."""
         return self._git(["diff", "--no-color"], self._require(task_id))
+
+    # --- publishing --------------------------------------------------------------
+
+    def current_branch(self, task_id: str) -> str:
+        return self._git(["rev-parse", "--abbrev-ref", "HEAD"], self._require(task_id)).strip()
+
+    def base_branch(self, task_id: str) -> str:
+        """The branch the clone was made from (the repository's default branch)."""
+        ref = self._git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], self._require(task_id)).strip()
+        return ref.removeprefix("origin/")
+
+    def commit_to_branch(self, task_id: str, branch: str, message: str, author: tuple[str, str]) -> str:
+        """Commit the workspace's edits to a new branch; returns the commit id.
+
+        Only files git already tracks are included (`add -u`), so a stray new file can never be
+        published by accident. Safe to call again: if we are already on the branch, nothing is redone.
+        """
+        if not BRANCH.match(branch):
+            raise InvalidPath(branch)  # the name goes to git: only our own pattern is allowed
+        ws = self._require(task_id)
+        if self.current_branch(task_id) != branch:
+            self._git(["checkout", "-b", branch], ws)
+            self._git(["add", "-u"], ws)
+            name, email = author
+            self._git(["-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "-m", message], ws)
+        return self._git(["rev-parse", "HEAD"], ws).strip()
+
+    def push_branch(self, task_id: str, branch: str) -> None:
+        """Push the branch. Never forced: if the remote branch exists with other history, this fails."""
+        if not BRANCH.match(branch):
+            raise InvalidPath(branch)
+        self._git(["push", "origin", f"HEAD:refs/heads/{branch}"], self._require(task_id))

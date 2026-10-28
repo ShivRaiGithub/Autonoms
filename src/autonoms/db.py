@@ -47,6 +47,22 @@ class MemoryRow(Base):
     use_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class PublicationRow(Base):
+    """Audit record: one row per task that was published as a pull request."""
+
+    __tablename__ = "publications"
+
+    task_id: Mapped[str] = mapped_column(String(36), primary_key=True)  # one publication per task
+    branch: Mapped[str] = mapped_column(String(100))
+    base: Mapped[str] = mapped_column(String(100))
+    pr_number: Mapped[int] = mapped_column(Integer)
+    pr_url: Mapped[str] = mapped_column(String)
+    approved_by: Mapped[str] = mapped_column(String(80))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    draft: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 @lru_cache
 def get_engine() -> Engine:
     # pool_pre_ping checks a pooled connection is alive before using it.

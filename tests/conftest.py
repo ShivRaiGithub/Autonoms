@@ -6,7 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from autonoms.db import Base, get_session
 from autonoms.github import GitHubClient
@@ -44,22 +43,26 @@ def fake_github():
 
 
 @pytest.fixture
-def db_session():
-    """An in-memory SQLite database standing in for Postgres: no server needed."""
-    # StaticPool keeps one connection, otherwise each connection sees a fresh empty DB.
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+def db_session(tmp_path):
+    """A SQLite database standing in for Postgres: no server needed.
+
+    Like the real app, every request gets its OWN session. (A single shared session was fine
+    while one request ran at a time, but the web UI's polling timer overlaps other requests, and a
+    Session must not be used from two threads at once.) A file, not ":memory:", so that separate
+    connections see the same data.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    session = Session(engine)
 
     def override():
-        yield session
+        with Session(engine) as per_request:
+            yield per_request
 
     app.dependency_overrides[get_session] = override
-    yield session
+    with Session(engine) as session:  # for tests that want to look at the database directly
+        yield session
     app.dependency_overrides.pop(get_session, None)
-    session.close()
+    engine.dispose()
 
 
 GIT_ENV = {
@@ -131,3 +134,4 @@ def memory_checkpointer():
     app.dependency_overrides[get_checkpointer] = lambda: saver
     yield saver
     app.dependency_overrides.pop(get_checkpointer, None)
+
