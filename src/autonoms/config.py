@@ -23,12 +23,6 @@ class Settings(BaseSettings):
     api_url: str = "http://127.0.0.1:8000"
     ui_port: int = 8765  # 8080 is commonly taken (Jenkins, proxies)
 
-    # How the agent reaches a model: "ollama" = directly, "gateway" = through the LiteLLM proxy.
-    llm_backend: str = "ollama"
-    gateway_url: str = "http://127.0.0.1:4000"
-    gateway_model: str = "autonoms"  # the public model name in gateway/config.yaml
-    litellm_master_key: SecretStr | None = None
-
     # The local LLM. "9b-8k" is your 8k-context variant: faster and fits the GPU better.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:9b-8k"

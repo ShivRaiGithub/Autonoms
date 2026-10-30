@@ -50,8 +50,6 @@ class RunState(TypedDict, total=False):
     completion_tokens: Annotated[int, operator.add]
     peak_prompt_tokens: int
     model_seconds: Annotated[float, operator.add]
-    gateway_ms: Annotated[float, operator.add]
-    fallbacks: Annotated[int, operator.add]
     models: Annotated[list, operator.add]  # the model that answered each call
     compactions: Annotated[int, operator.add]  # calls where older steps were collapsed
     memory_ids: list  # long-term memories shown to the model
@@ -145,8 +143,6 @@ class Workflow:
             "peak_prompt_tokens": max(state.get("peak_prompt_tokens", 0), prompt_tokens),
             "compactions": 1 if compacted else 0,
             "model_seconds": usage.get("seconds", 0.0),
-            "gateway_ms": usage.get("gateway_ms", 0.0),
-            "fallbacks": usage.get("fallbacks", 0),
             "models": [usage["model"]] if usage.get("model") else [],
         }
         if not reply["tool_calls"]:
@@ -297,8 +293,6 @@ class Workflow:
                 completion_tokens=v.get("completion_tokens", 0),
                 peak_prompt_tokens=v.get("peak_prompt_tokens", 0),
                 model_seconds=round(v.get("model_seconds", 0.0), 1),
-                gateway_overhead_ms=round(v.get("gateway_ms", 0.0), 1),
-                fallbacks=v.get("fallbacks", 0),
             ),
             models_used=list(dict.fromkeys(v.get("models", []))),
             compactions=v.get("compactions", 0),

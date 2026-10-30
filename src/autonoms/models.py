@@ -134,8 +134,6 @@ class Usage(BaseModel):
     completion_tokens: int = 0
     peak_prompt_tokens: int = 0  # the largest single prompt: compare with the 8192 window
     model_seconds: float = 0  # time spent waiting for the model, summed over calls
-    gateway_overhead_ms: float = 0  # time the gateway itself added (0 when calling Ollama directly)
-    fallbacks: int = 0  # calls the gateway re-routed to the backup model
 
 
 class AgentRun(BaseModel):

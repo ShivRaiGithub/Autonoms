@@ -25,7 +25,6 @@ class Evaluation(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     compactions: int
-    fallbacks: int
 
 
 def evaluate(task: Task, run: AgentRun) -> Evaluation:
@@ -47,6 +46,5 @@ def evaluate(task: Task, run: AgentRun) -> Evaluation:
         prompt_tokens=run.usage.prompt_tokens,
         completion_tokens=run.usage.completion_tokens,
         compactions=run.compactions,
-        fallbacks=run.usage.fallbacks,
     )
 

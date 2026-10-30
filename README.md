@@ -4,7 +4,7 @@
 
 It runs on a **local LLM** (Ollama), uses **LangGraph** for a resumable workflow, and was built **one technology at a time** as a learning project: every stage has a write-up in [`docs/`](docs/00-roadmap.md) explaining what was added, why, and what went wrong.
 
-> **Status:** all 12 stages are built and tested (281 tests). One step is not yet verified against the real service: **publishing the pull request to GitHub** (the access token used during development could read the repository but not write to it). The push/PR logic is tested against a local git repository and a mocked GitHub API. See [Honest status](#honest-status).
+> **Status:** all 12 stages are built and tested (268 tests). One step is not yet verified against the real service: **publishing the pull request to GitHub** (the access token used during development could read the repository but not write to it). The push/PR logic is tested against a local git repository and a mocked GitHub API. See [Honest status](#honest-status).
 
 ## How it works
 
@@ -40,14 +40,13 @@ GitHub issue ──► task (Postgres) ──► clone into an isolated workspac
 | Workflow | LangGraph graph with conditional repair routing and Postgres checkpoints |
 | Memory | Scoped long-term notes (conventions, pitfalls, run history), secret filtering, relevance-only retrieval |
 | Context | Older steps are collapsed into short notes when the conversation gets large |
-| Gateway (optional) | LiteLLM proxy in Docker: model routing, fallback, rate limits, latency tracking |
 | Review and PR | Report, risks, blockers and warnings, fingerprint-bound approval, draft PRs |
 | Evaluation | Local per-run summary: completed, clean, in scope, cost and latency |
 | Web UI | NiceGUI page: create a task, run with live progress, read the diff, approve |
 
 ## Technology
 
-Python 3.13 · FastAPI · Pydantic · SQLAlchemy + PostgreSQL · Git · LlamaIndex · Ollama (tool calling) · Docker · LangGraph · LiteLLM · NiceGUI · pytest
+Python 3.13 · FastAPI · Pydantic · SQLAlchemy + PostgreSQL · Git · LlamaIndex · Ollama (tool calling) · Docker · LangGraph · NiceGUI · pytest
 
 ## Quick start
 
@@ -74,7 +73,6 @@ Create an empty database for it first (for example `CREATE DATABASE autonoms;`).
 | `POSTGRES_CONNECTION_STRING` | everything | `postgresql://user:password@host:5432/autonoms` |
 | `GITHUB_TOKEN` | reading issues (public repos work without it, with a low rate limit) and **publishing** | To publish, a fine-grained token needs *Contents: Read and write* and *Pull requests: Read and write* on the target repository |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | the model | defaults: `http://localhost:11434`, `qwen3.5:9b-8k` |
-| `LLM_BACKEND`, `LITELLM_MASTER_KEY` | optional gateway | `LLM_BACKEND=gateway`, then `./gateway/run.sh` (see [Stage 9](docs/stage-09-litellm-gateway.md)) |
 | `API_URL`, `UI_PORT` | the web page | defaults: `http://127.0.0.1:8000`, `8765` |
 
 Secrets are held as `SecretStr` (never printed in logs or `repr`), and nothing is sent to any tracing service.
@@ -100,7 +98,7 @@ Interactive API docs: <http://localhost:8000/docs>.
 ## Tests
 
 ```bash
-uv run pytest        # 281 tests
+uv run pytest        # 268 tests
 ```
 Most tests need no services: they use fakes and an in-memory or file-backed SQLite database. The sandbox tests use real Docker and skip themselves if the image is missing; the search tests use the real embedding model; the UI tests use NiceGUI's simulated user against the real API. Nothing in the suite touches your Postgres or GitHub.
 
@@ -113,10 +111,10 @@ src/autonoms/
   workspace.py     git clone/commit/push, safe paths  memory.py      long-term memory
   search.py        LlamaIndex retrieval               report.py      review text, risks, fingerprint
   sandbox.py       locked-down Docker runner          evaluation.py  per-run summary
-  checker.py       runs checks/arithmetic_check.py    llm.py         Ollama and gateway clients
+  checker.py       runs checks/arithmetic_check.py    llm.py         Ollama client
   ui/              the NiceGUI page                   github.py      GitHub API client
-gateway/           LiteLLM config and start script    tests/         281 tests
 docs/              one write-up per stage             seed-repo/     practice notes and issues
+tests/             268 tests
 ```
 
 ## Learning notes
@@ -127,12 +125,12 @@ Each stage added one technology, was tested, and was run against the real servic
 |---|---|---|---|
 | 1 | [Issue intake: FastAPI, Pydantic, GitHub API](docs/stage-01-issue-intake.md) | 7 | [LangGraph with Postgres checkpoints](docs/stage-07-langgraph-checkpoints.md) |
 | 2 | [PostgreSQL task records](docs/stage-02-postgres-tasks.md) | 8 | [Memory and context management](docs/stage-08-memory-and-context.md) |
-| 3 | [Git workspaces](docs/stage-03-git-workspace.md) | 9 | [LiteLLM gateway and prompt reuse](docs/stage-09-litellm-gateway.md) |
+| 3 | [Git workspaces](docs/stage-03-git-workspace.md) | 9 | *(LiteLLM gateway: removed)* |
 | 4 | [LlamaIndex search](docs/stage-04-llamaindex-search.md) | 10 | [Human-approved pull requests](docs/stage-10-human-approved-pr.md) |
 | 5 | [Tool-calling agent on a local model](docs/stage-05-tool-calling-agent.md) | 11 | [Evaluation (and why LangSmith was dropped)](docs/stage-11-evaluation.md) |
 | 6 | [Docker sandbox and checks](docs/stage-06-docker-sandbox.md) | 12 | [Web interface](docs/stage-12-web-ui.md) |
 
-The plan and its decisions are in the [roadmap](docs/00-roadmap.md); the original specification is [`docs/autonoms.md`](docs/autonoms.md). Two things in the spec were deliberately dropped: the Neo4j knowledge graph (the practice notes are independent files, so a graph had nothing to hold) and LangSmith tracing (usage is visible through the gateway and in each run result).
+The plan and its decisions are in the [roadmap](docs/00-roadmap.md); the original specification is [`docs/autonoms.md`](docs/autonoms.md). Two things in the spec were deliberately dropped: the Neo4j knowledge graph (the practice notes are independent files, so a graph had nothing to hold) and LangSmith tracing (usage is visible in each run result).
 
 ## Honest status
 
